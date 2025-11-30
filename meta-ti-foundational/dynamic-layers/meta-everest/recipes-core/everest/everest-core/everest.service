@@ -1,7 +1,7 @@
 [Unit]
 Description=EVerest
-Requires=mosquitto.service cg5317-host.service
-After=mosquitto.service cg5317-host.service
+Requires=mosquitto.service cg5317-host@0.service
+After=mosquitto.service cg5317-host@0.service
 ConditionFileNotEmpty=/etc/everest/config.yaml
 
 [Service]

@@ -1,0 +1,348 @@
+# SPDX-License-Identifier: MIT
+#
+# GitHub Actions PR checker for meta-tisdk.
+# Runs recipe linting (oelint-adv) and official Yocto layer validation
+# (yocto-check-layer) on every pull request.
+
+name: PR Checker
+
+on:
+  pull_request:
+    branches:
+      - scarthgap-next
+      - master-next
+
+concurrency:
+  group: pr-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+# Dependency branch pins — update these when moving to a new Yocto release.
+env:
+  BITBAKE_BRANCH: master
+  OE_CORE_BRANCH: master
+  META_TI_BRANCH: master-next
+  META_ARAGO_BRANCH: master-next
+  META_OE_BRANCH: master
+  META_ARM_BRANCH: master
+  META_CLANG_BRANCH: master
+  META_VIRT_BRANCH: master
+
+jobs:
+  # -------------------------------------------------------------------
+  # Job 1: oelint-adv on ALL recipes (informational / non-blocking)
+  # -------------------------------------------------------------------
+  lint-recipes:
+    name: "oelint-adv (all recipes)"
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install oelint-adv
+        run: pip3 install oelint-adv
+
+      - name: Run oelint-adv
+        run: |
+          files=$(find meta-ti-foundational meta-ti-ml -type f \
+            \( -name "*.bb" -o -name "*.bbappend" -o -name "*.bbclass" \))
+
+          if [ -z "$files" ]; then
+            echo "No recipe files found."
+            echo "No recipe files found." > oelint-results.txt
+            exit 0
+          fi
+
+          echo "$files" | xargs oelint-adv \
+            --exit-zero \
+            --relpaths \
+            --quiet \
+            --suppress oelint.file.requirenotfound \
+            --suppress oelint.file.includenotfound \
+            --suppress oelint.var.mandatoryvar.AUTHOR \
+            --suppress oelint.var.mandatoryvar.SECTION \
+            --suppress oelint.var.mandatoryvar.HOMEPAGE \
+            --suppress oelint.var.order \
+            --suppress oelint.tabs.notabs \
+            | tee oelint-results.txt || true
+
+          if [ ! -s oelint-results.txt ]; then
+            echo "No findings." > oelint-results.txt
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oelint-results
+          path: oelint-results.txt
+
+  # -------------------------------------------------------------------
+  # Job 2: yocto-check-layer (blocking)
+  # -------------------------------------------------------------------
+  yocto-check-layer:
+    name: "yocto-check-layer"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout meta-tisdk
+        uses: actions/checkout@v4
+        with:
+          path: meta-tisdk
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq diffstat chrpath lz4
+
+      - name: Clone dependency layers
+        run: |
+          git clone --depth 1 -b "$BITBAKE_BRANCH" \
+            https://github.com/openembedded/bitbake.git
+          git clone --depth 1 -b "$OE_CORE_BRANCH" \
+            https://github.com/openembedded/openembedded-core.git
+          git clone --depth 1 -b "$META_TI_BRANCH" \
+            https://github.com/TexasInstruments/meta-ti.git
+          git clone --depth 1 -b "$META_ARAGO_BRANCH" \
+            https://github.com/TexasInstruments/meta-arago.git
+          git clone --depth 1 -b "$META_OE_BRANCH" \
+            https://github.com/openembedded/meta-openembedded.git
+          git clone --depth 1 -b "$META_ARM_BRANCH" \
+            https://git.yoctoproject.org/meta-arm
+          git clone --depth 1 -b "$META_CLANG_BRANCH" \
+            https://github.com/kraj/meta-clang.git
+          git clone --depth 1 -b "$META_VIRT_BRANCH" \
+            https://github.com/openembedded/meta-virtualization.git
+
+      - name: Set up build environment and add layers
+        run: |
+          # Point bitbake at our standalone clone
+          ln -sf "$GITHUB_WORKSPACE/bitbake" \
+            "$GITHUB_WORKSPACE/openembedded-core/bitbake"
+
+          source openembedded-core/oe-init-build-env build
+
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-arm/meta-arm-toolchain"
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-arm/meta-arm"
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-clang"
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-openembedded/meta-oe"
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-openembedded/meta-python"
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-openembedded/meta-networking"
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-openembedded/meta-multimedia"
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-virtualization"
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-ti/meta-ti-bsp"
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-ti/meta-ti-extras"
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-arago/meta-arago-distro"
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-arago/meta-arago-extras"
+          bitbake-layers add-layer "$GITHUB_WORKSPACE/meta-arago/meta-arago-test"
+
+      - name: Run yocto-check-layer
+        run: |
+          source openembedded-core/oe-init-build-env build
+
+          "$GITHUB_WORKSPACE/openembedded-core/scripts/yocto-check-layer" \
+            --no-auto-dependency \
+            --without-software-layer-signature-check \
+            "$GITHUB_WORKSPACE/meta-tisdk/meta-ti-foundational" \
+            "$GITHUB_WORKSPACE/meta-tisdk/meta-ti-ml" \
+            2>&1 | tee "$GITHUB_WORKSPACE/yocto-check-layer-results.txt"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: yocto-check-layer-results
+          path: yocto-check-layer-results.txt
+
+  # -------------------------------------------------------------------
+  # Job 3: oelint-adv on changed recipes only (informational)
+  # -------------------------------------------------------------------
+  lint-changed:
+    name: "oelint-adv (changed files)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout (full history for diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find changed recipe files
+        id: changed
+        run: |
+          files=$(git diff --name-only --diff-filter=ACMR \
+            "origin/${{ github.event.pull_request.base.ref }}...HEAD" \
+            -- '*.bb' '*.bbappend' '*.bbclass' || true)
+
+          if [ -z "$files" ]; then
+            echo "No recipe files changed in this PR."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changed recipe files:"
+            echo "$files"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            # Save to a file for the next step
+            echo "$files" > changed-files.txt
+          fi
+
+      - name: Set up Python
+        if: steps.changed.outputs.skip == 'false'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install oelint-adv
+        if: steps.changed.outputs.skip == 'false'
+        run: pip3 install oelint-adv
+
+      - name: Run oelint-adv on changed files
+        if: steps.changed.outputs.skip == 'false'
+        run: |
+          # Same suppressions as full lint but WITHOUT HOMEPAGE —
+          # nudge new/modified recipes toward including it.
+          cat changed-files.txt | xargs oelint-adv \
+            --exit-zero \
+            --relpaths \
+            --quiet \
+            --suppress oelint.file.requirenotfound \
+            --suppress oelint.file.includenotfound \
+            --suppress oelint.var.mandatoryvar.AUTHOR \
+            --suppress oelint.var.mandatoryvar.SECTION \
+            --suppress oelint.var.order \
+            --suppress oelint.tabs.notabs
+
+  # -------------------------------------------------------------------
+  # Job 4: Post summary comment on the PR
+  # -------------------------------------------------------------------
+  comment-pr:
+    name: "PR comment"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - lint-recipes
+      - yocto-check-layer
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Download oelint-adv results
+        uses: actions/download-artifact@v4
+        with:
+          name: oelint-results
+          path: artifacts/oelint
+        continue-on-error: true
+
+      - name: Download yocto-check-layer results
+        uses: actions/download-artifact@v4
+        with:
+          name: yocto-check-layer-results
+          path: artifacts/yocto
+        continue-on-error: true
+
+      - name: Build comment body
+        id: comment
+        run: |
+          # --- oelint-adv section ---
+          if [ -f artifacts/oelint/oelint-results.txt ]; then
+            oelint_raw=$(cat artifacts/oelint/oelint-results.txt)
+            oelint_lines=$(echo "$oelint_raw" | wc -l)
+            if echo "$oelint_raw" | grep -qE "^No findings\.$"; then
+              oelint_status=":white_check_mark: Clean"
+              oelint_body="No findings."
+            else
+              issue_count=$(echo "$oelint_raw" | grep -c ':' || true)
+              oelint_status=":warning: Findings (non-blocking)"
+              if [ "$oelint_lines" -gt 200 ]; then
+                oelint_body="$(echo "$oelint_raw" | head -200)"
+                oelint_body="${oelint_body}
+          ... (truncated, ${oelint_lines} lines total — see workflow artifacts for full output)"
+              else
+                oelint_body="$oelint_raw"
+              fi
+            fi
+          else
+            oelint_status=":grey_question: No results"
+            oelint_body="Artifact not available."
+          fi
+
+          # --- yocto-check-layer section ---
+          if [ -f artifacts/yocto/yocto-check-layer-results.txt ]; then
+            yocto_raw=$(cat artifacts/yocto/yocto-check-layer-results.txt)
+            yocto_lines=$(echo "$yocto_raw" | wc -l)
+            if echo "$yocto_raw" | grep -q "FAIL"; then
+              yocto_status=":x: Failed"
+            else
+              yocto_status=":white_check_mark: Passed"
+            fi
+            if [ "$yocto_lines" -gt 200 ]; then
+              yocto_body="$(echo "$yocto_raw" | head -200)"
+              yocto_body="${yocto_body}
+          ... (truncated, ${yocto_lines} lines total — see workflow artifacts for full output)"
+            else
+              yocto_body="$yocto_raw"
+            fi
+          else
+            if [ "${{ needs.yocto-check-layer.result }}" = "failure" ]; then
+              yocto_status=":x: Failed"
+            elif [ "${{ needs.yocto-check-layer.result }}" = "cancelled" ]; then
+              yocto_status=":grey_question: Cancelled"
+            else
+              yocto_status=":grey_question: No results"
+            fi
+            yocto_body="Artifact not available — check the workflow run logs."
+          fi
+
+          # --- Compose the comment ---
+          # Use a heredoc written to a file to avoid quoting issues
+          cat > comment-body.md <<'HEADER'
+          <!-- meta-tisdk-pr-check-bot -->
+          ## PR Check Results
+
+          | Check | Status |
+          |-------|--------|
+          HEADER
+
+          echo "| oelint-adv (recipe lint) | ${oelint_status} |" >> comment-body.md
+          echo "| yocto-check-layer | ${yocto_status} |" >> comment-body.md
+          echo "" >> comment-body.md
+
+          # oelint details
+          echo "<details>" >> comment-body.md
+          echo "<summary>oelint-adv findings</summary>" >> comment-body.md
+          echo "" >> comment-body.md
+          echo '```' >> comment-body.md
+          echo "$oelint_body" >> comment-body.md
+          echo '```' >> comment-body.md
+          echo "" >> comment-body.md
+          echo "</details>" >> comment-body.md
+          echo "" >> comment-body.md
+
+          # yocto-check-layer details
+          echo "<details>" >> comment-body.md
+          echo "<summary>yocto-check-layer output</summary>" >> comment-body.md
+          echo "" >> comment-body.md
+          echo '```' >> comment-body.md
+          echo "$yocto_body" >> comment-body.md
+          echo '```' >> comment-body.md
+          echo "" >> comment-body.md
+          echo "</details>" >> comment-body.md
+
+      - name: Find existing bot comment
+        uses: peter-evans/find-comment@v3
+        id: find-comment
+        with:
+          issue-number: ${{ github.event.pull_request.number }}
+          body-includes: "<!-- meta-tisdk-pr-check-bot -->"
+
+      - name: Post or update PR comment
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ steps.find-comment.outputs.comment-id }}
+          issue-number: ${{ github.event.pull_request.number }}
+          body-path: comment-body.md
+          edit-mode: replace

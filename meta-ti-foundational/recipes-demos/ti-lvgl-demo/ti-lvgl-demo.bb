@@ -19,7 +19,7 @@ SRCREV_lvdemos = "de9c755979b690a2064b80d993bd14f0be7eff5b"
 SRCREV_lvdemos:am62lxx-evm = "2f469710c47e188a6e70d7d6cf09a469c117d14b"
 SRCREV_FORMAT = "main_lvdemos"
 
-inherit cmake systemd python3native
+inherit cmake pkgconfig systemd python3native
 SYSTEMD_PACKAGES = "${PN}"
 SYSTEMD_SERVICE:${PN} = "${PN}.service"
 

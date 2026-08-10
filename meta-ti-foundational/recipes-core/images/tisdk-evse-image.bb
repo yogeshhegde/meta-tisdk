@@ -14,7 +14,9 @@ IMAGE_INSTALL:append = " \
     kernel-module-lms-eth2spi \
     lms-eth2spi \
     open-plc-utils \
+    mosquitto \
     tzdata \
+    tida-010939-everest-config everest-core \
 "
 
 export IMAGE_BASENAME = "tisdk-evse-image${ARAGO_IMAGE_SUFFIX}"
